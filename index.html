@@ -17,6 +17,7 @@ body {
     height: 100dvh;
     margin: 0;
     overflow: hidden;
+    overscroll-behavior-y: none;
     padding: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
 }
 .board {
@@ -40,6 +41,31 @@ body {
     color: white;
     border-bottom: 2px solid #333;
 }
+
+/* Pull-to-refresh feedback floats over the connected countdown board. */
+.pull-indicator {
+    position: fixed;
+    z-index: 20;
+    top: max(14px, calc(env(safe-area-inset-top) + 10px));
+    left: 50%;
+    transform: translate(-50%, -12px);
+    opacity: 0;
+    pointer-events: none;
+    padding: 10px 16px;
+    border-radius: 999px;
+    color: #fff;
+    background: rgba(30, 30, 30, 0.96);
+    box-shadow: 0 3px 16px rgba(0, 0, 0, 0.25);
+    font: 600 14px Arial, sans-serif;
+    white-space: nowrap;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+body.is-pulling .pull-indicator {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+.board { transition: transform 0.15s ease-out; }
+body.is-pulling .board { transition: none; }
 
 /* Keep the original header and all five flaps in one connected panel. */
 .header .pointing-hand { font-size: clamp(20px, 4dvh, 36px); line-height: 1; margin-bottom: 5px; }
@@ -163,6 +189,7 @@ body {
 </head>
 <body>
 
+<div id="pull-indicator" class="pull-indicator" role="status" aria-live="polite">↓ Pull to refresh</div>
 <div class="board">
     <div class="header">
         <div class="pointing-hand">👇</div>
@@ -302,8 +329,12 @@ function toggleFlap(flap) {
     }
 }
 
+let ignoreTouchClicksUntil = 0;
 flaps.forEach(flap => {
-    flap.addEventListener('click', () => toggleFlap(flap));
+    flap.addEventListener('click', () => {
+        if (Date.now() < ignoreTouchClicksUntil) return;
+        toggleFlap(flap);
+    });
     flap.addEventListener('keydown', event => {
         if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
@@ -326,6 +357,75 @@ function restartCountdown() {
     });
     updateLights();
 }
+
+// A full-screen board cannot scroll, so implement the familiar mobile
+// pull-to-refresh gesture without opening or closing a flap accidentally.
+const board = document.querySelector('.board');
+const pullIndicator = document.getElementById('pull-indicator');
+const pullThreshold = 100;
+let pullStart = null;
+let activeTouchId = null;
+let isPulling = false;
+let refreshInProgress = false;
+
+function resetPullGesture() {
+    pullStart = null;
+    activeTouchId = null;
+    isPulling = false;
+    document.body.classList.remove('is-pulling');
+    board.style.transform = '';
+    pullIndicator.textContent = '↓ Pull to refresh';
+}
+
+function getTrackedTouch(touches) {
+    return Array.from(touches).find(touch => touch.identifier === activeTouchId);
+}
+
+document.addEventListener('touchstart', event => {
+    if (refreshInProgress || event.touches.length !== 1 || !event.target.closest('.board')) return;
+    const touch = event.touches[0];
+    activeTouchId = touch.identifier;
+    pullStart = { x: touch.clientX, y: touch.clientY };
+    isPulling = false;
+}, { passive: true });
+
+document.addEventListener('touchmove', event => {
+    if (!pullStart || refreshInProgress || event.touches.length !== 1) return;
+    const touch = getTrackedTouch(event.touches);
+    if (!touch) return;
+    const dx = Math.abs(touch.clientX - pullStart.x);
+    const dy = touch.clientY - pullStart.y;
+    if (!isPulling) {
+        if (dy <= 10 || dy < dx * 1.2) return;
+        isPulling = true;
+        document.body.classList.add('is-pulling');
+    }
+    // Suppress native overscroll/bounce and click generation during a pull.
+    if (event.cancelable) event.preventDefault();
+    ignoreTouchClicksUntil = Date.now() + 500;
+    const distance = Math.max(0, dy);
+    board.style.transform = `translateY(${Math.min(55, distance * 0.32)}px)`;
+    pullIndicator.textContent = distance >= pullThreshold
+        ? '↻ Release to refresh' : '↓ Pull to refresh';
+}, { passive: false });
+
+document.addEventListener('touchend', event => {
+    if (!pullStart) return;
+    const touch = getTrackedTouch(event.changedTouches);
+    if (!touch) return;
+    const dy = touch.clientY - pullStart.y;
+    const shouldRefresh = isPulling && dy >= pullThreshold;
+    resetPullGesture();
+    if (shouldRefresh && !refreshInProgress) {
+        refreshInProgress = true;
+        pullIndicator.textContent = '↻ Refreshing…';
+        document.body.classList.add('is-pulling');
+        // Reload the webpage itself; this also resets all flaps and lights.
+        window.location.reload();
+    }
+}, { passive: true });
+
+document.addEventListener('touchcancel', resetPullGesture, { passive: true });
 
 setInterval(() => {
     updateLights();
